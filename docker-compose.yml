@@ -1,0 +1,72 @@
+name: memora-os
+
+x-app: &app
+  build: .
+  image: memora-os:latest
+  env_file: .env
+  environment:
+    # Inside the compose network the database is always reachable as "db".
+    DATABASE_URL: postgresql+asyncpg://memora:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/memora
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: memora
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: memora
+      TZ: Asia/Tashkent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memora -d memora"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: applies Alembic migrations, then exits. bot/worker wait for it.
+  migrate:
+    <<: *app
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Telegram long polling: menus, callbacks, agents, voice.
+  bot:
+    <<: *app
+    command: ["bot"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "memora", "healthcheck", "bot"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Proactive engine: briefing, T-15 alerts, post-class prompts, reminders, sync loops.
+  worker:
+    <<: *app
+    command: ["worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "memora", "healthcheck", "worker"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  pgdata:
